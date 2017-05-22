@@ -1,2 +1,2 @@
-bin_SCRIPTS = ostree-upgrade.sh
+bin_SCRIPTS = refkit-ostree
 
