@@ -12,5 +12,5 @@ AC_ARG_WITH(systemdunitdir,
 
 AC_OUTPUT([Makefile])
 
-# echo "Effective configuration:"
-
+echo "Effective configuration:"
+echo "* systemd unit directory: $systemd_unitdir"
