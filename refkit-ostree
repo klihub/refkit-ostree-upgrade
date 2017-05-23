@@ -7,24 +7,32 @@ EXTERNAL_UUID='12345678-9abc-def0-0fed-cba987654321'
 # Our distro name.
 DISTRO='refkit'
 
+# update poll interval
+POLL_INTERVAL=30
+
+# upgrade poll and apply markers
+POLL_MARKER=/run/ostree.polling
+APPLY_MARKER=/run/ostree.applying
+
 # Print an informational message.
 info_msg () {
-    [ -n "$INITRAMFS" ] && msg "$*" || echo "$*"
+    [ -n "$INITRAMFS" ] && echo "$*" > /dev/console || echo "$*"
 }
 
 # Print an error message.
 error_msg () {
-    [ -n "$INITRAMFS" ] && error "$*" || echo "error: $*"
+    [ -n "$INITRAMFS" ] && echo "$*" > /dev/console || echo "error: $*"
 }
 
 # Print a fatal error message, starting a shell if we're in development mode.
 fatal_msg () {
     if [ -n "$INITRAMFS" ]; then
         if grep -q "imagetype=development" /proc/cmdline; then
-            error "$*"
+            error_msg "$*"
             /bin/sh
         else
-            fatal "$*"
+            echo "$*" > /dev/console
+            exit 1
         fi
     else
         echo "fatal error: $*"
@@ -37,7 +45,7 @@ debug_msg () {
     if [ -z "$DEBUG" ]; then
         return 0
     fi
-    [ -n "$INITRAMFS" ] && msg "$*" || echo "D: $*"
+    [ -n "$INITRAMFS" ] && echo "$*" > /dev/console || echo "D: $*"
 }
 
 # Stat a filesystem entry for device and and inode number.
@@ -112,7 +120,7 @@ root_uuid () {
 }
 
 # Discover BootLoaderSpec-compliant boot loader entries.
-discover_loader_entries () {
+ostree_loader_entries () {
     local _boot=${1:-/boot}
     local _evar=${2:-ENTRY}
     local _ovar=${3:-PATH}
@@ -188,7 +196,7 @@ ostree_boot_path () {
             return 1
         fi
         if [ "$_pnode" = "$_bnode" ]; then
-            eval "$_var=\"$_b\""
+            eval "$_var=\"${_b#/sysroot}\""
             return 0
         fi
     done
@@ -197,7 +205,7 @@ ostree_boot_path () {
 }
 
 # Discover currently running ostree entry.
-discover_running_entry () {
+ostree_running_entry () {
     local _var="${1:-RUNNING}"
     local _r_stat _e_stat
 
@@ -295,7 +303,7 @@ initramfs_prepare_root () {
     info_msg "* ostree: preparing ostree rootfs for booting..."
 
     # Discover, and parse loader entries.
-    if ! discover_loader_entries /rootfs/boot _entry _path; then
+    if ! ostree_loader_entries /rootfs/boot _entry _path; then
         fatal_msg "failed to discover loader entries"
     fi
 
@@ -321,7 +329,7 @@ patch_proc_cmdline () {
     info_msg "* Patching /proc/cmdline with ostree arguments..."
 
     if [ -z "$_options" ]; then
-        if ! discover_loader_entries /boot ENTRY OPTIONS; then
+        if ! ostree_loader_entries /boot ENTRY OPTIONS; then
             error_msg "failed to discover loader entries"
             return 1
         else
@@ -380,7 +388,9 @@ mount_efi () {
 fetch_updates () {
     info_msg "* Fetching OS updates..."
 
+    touch $POLL_MARKER
     ostree admin upgrade --pull-only
+    rm -f $POLL_MARKER
 }
 
 # Apply any locally pending updates.
@@ -390,7 +400,7 @@ apply_updates () {
 
     info_msg "* Applying pending OS updates..."
 
-    if ! discover_running_entry _running; then
+    if ! ostree_running_entry _running; then
         fatal_msg "failed to discover running entry"
     fi
 
@@ -401,9 +411,11 @@ apply_updates () {
         return 1
     fi
 
+    touch $APPLY_MARKER
     ostree admin upgrade --deploy-only
+    rm -f $APPLY_MARKER
 
-    if ! discover_loader_entries /boot _entry _path; then
+    if ! ostree_loader_entries /boot _entry _path; then
         fatal_msg "failed to discover loader entries"
     fi
 
@@ -427,7 +439,7 @@ update_uefi_app () {
 
     info_msg "* Updating UEFI combo app..."
 
-    if ! discover_loader_entries /boot _entry _path; then
+    if ! ostree_loader_entries /boot _entry _path; then
         fatal_msg "failed to discover loader entries"
     fi
 
@@ -487,10 +499,43 @@ update_uefi_app () {
 }
 
 # Pull and apply any updates, update UEFI combo app if necessary.
-upgrade () {
-    info_msg "* Upgrading OS..."
+update () {
+    info_msg "* Updating OS..."
 
     fetch_updates && apply_updates && update_uefi_app
+}
+
+# SIGUSR handler
+sigusr1_handler () {
+    info_msg "* Received SIGUSR1, polling for updates"
+    fetch_updates
+}
+
+# Sit around in a loop sleeping and periodically polling for updates.
+update_daemon () {
+    local _i _n
+
+    trap "sigusr1_handler" SIGUSR1
+
+    # signal(1) does not have an option to exit on receipt of signals.
+    # Hence, a naive loop with a single sleep(1) would only get around
+    # to handle any received signals once the sleep is done... which in
+    # our case would be completely pointless. Therefore we kludge this
+    # around by breaking up our interval in 10 second chunks to let our
+    # SIGUSR1 handler kick in with a worst-case delay of 10 seconds.
+
+    info_msg "Entering update poll loop (interval: $POLL_INTERVAL seconds)"
+
+    _n=$(($POLL_INTERVAL / 10))
+    while true; do
+        info_msg "* Polling for available upgdates..."
+        fetch_updates
+        _i=0
+        while [ $_i -lt $_n ]; do
+            sleep 10
+            let _i=$_i+1
+        done
+    done
 }
 
 # Roll back to the previously active version.
@@ -502,7 +547,7 @@ rollback () {
 running_version () {
     local _entry _bp
 
-    if ! discover_running_entry _entry; then
+    if ! ostree_running_entry _entry; then
         fatal_msg "failed to discover running entry"
     fi
 
@@ -523,11 +568,30 @@ running_version () {
 latest_version () {
     local _entry_CURR _entry_PREV _path_CURR _path_PREV
 
-    if ! discover_loader_entries /boot _entry _path; then
+    if ! ostree_loader_entries /boot _entry _path; then
         fatal_msg "failed to discover running entry"
     fi
 
     info_msg "Latest entry: $_path_CURR"
+}
+
+# Print minimal help on usage.
+print_help () {
+    echo "$0 [--debug] command"
+    echo ""
+    echo "The possible commands are:"
+    echo "    prepare-root: prepare root for booting"
+    echo "    patch-proc-cmdline: patch /proc/cmdline with ostree=..."
+    echo "    mount-efi: mount the right EFI partition on /boot/efi/EFI"
+    echo "    fetch-updates: fetch updates without applying them"
+    echo "    apply-updates: apply fetched pending updates"
+    echo "    update-uefi-app: apply UEFI app if necessary"
+    echo "    update: fetch and apply updates, update UEFI app"
+    echo "    update-daemon: sit in a loop, fetching updates."
+    echo "    rollback: not implemented"
+    echo "    running-version: show the running ostree deployment"
+    echo "    latest-version: show the latest available deployment"
+    echo "    *: patch /proc/cmdline, then exec ostree with the given arguments"
 }
 
 
@@ -538,8 +602,39 @@ if [ -d /rootfs ]; then
     INITRAMFS=yes
 fi
 
+# Parse and remove command-line options.
+while [ "${1#-}" != "$1" ]; do
+    case $1 in
+        -d|--debug)
+            DEBUG=true
+            shift
+            ;;
+        -h|--help)
+            print_help
+            exit 0
+            ;;
+        --poll-interval|-i)
+            POLL_INTERVAL=$2
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Unknown option \'$1\', assuming an ostree native option."
+            break
+            ;;
+    esac
+done
+
+if [ "$1" = "-d" -o "$1" = "--debug" ]; then
+    DEBUG=true
+    shift
+fi
+
 case $1 in
-    initramfs-prepare-root)
+    initramfs-prepare-root|prepare-root)
         initramfs_prepare_root
         ;;
 
@@ -563,8 +658,12 @@ case $1 in
         update_uefi_app
         ;;
 
-    upgrade)
-        upgrade
+    update)
+        update
+        ;;
+
+    update-daemon)
+        update_daemon
         ;;
 
     rollback)
