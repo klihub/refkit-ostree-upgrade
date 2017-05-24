@@ -13,6 +13,7 @@ POLL_INTERVAL=30
 # upgrade poll and apply markers
 POLL_MARKER=/run/ostree.polling
 APPLY_MARKER=/run/ostree.applying
+POST_UPDATE_MARKER=/var/.ostree.updated
 
 # Print an informational message.
 info_msg () {
@@ -540,7 +541,25 @@ update_daemon () {
 
 # Roll back to the previously active version.
 rollback () {
-    :
+    info_msg "* Rollback not implemented..."
+}
+
+# Perform a post-update check.
+post_update_check () {
+    if [ -e $POST_UPDATE_MARKER ]; then
+        info_msg "* Performing post-update check..."
+        rm -f $POST_UPDATE_MARKER
+    else
+        info_msg "* Post-update marker ($POST_UPDATE_MARKER) not present..."
+    fi
+
+    return 0
+}
+
+# Perform a post-update failure/recovery actions if an update failed.
+post_update_recovery () {
+    info_msg "* Performing post-update failure recovery..."
+    rollback
 }
 
 # Determine the curently running version.
@@ -669,6 +688,14 @@ case $1 in
     rollback)
         ;;
 
+    post-update-check)
+        post_update_check
+        ;;
+
+    post-update-recovery)
+        post_update_recovery
+        ;;
+
     running-version|running)
         running_version
         ;;
@@ -683,3 +710,5 @@ case $1 in
         exec ostree $*
         ;;
 esac
+
+exit $?
