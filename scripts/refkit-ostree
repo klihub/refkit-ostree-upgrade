@@ -680,6 +680,6 @@ case $1 in
     # pass the rest directly to ostree
     *)
         patch_proc_cmdline
-        ostree $*
+        exec ostree $*
         ;;
 esac

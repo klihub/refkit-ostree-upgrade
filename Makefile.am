@@ -1,4 +1,3 @@
-bin_SCRIPTS  = refkit-ostree
-service_DATA = ostree-patch-proc-cmdline.service ostree-update.service
+bin_SCRIPTS  = scripts/*
+service_DATA = services/*.service
 servicedir   = ${systemd_unitdir}/system
-

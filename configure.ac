@@ -8,7 +8,9 @@ AM_INIT_AUTOMAKE([-Wno-portability subdir-objects foreign])
 
 AC_ARG_WITH(systemdunitdir,
   [AC_HELP_STRING([--with-systemdunitdir], [systemd unt directory])],
-  [systemd_unitdir="${withval}"], [systemd_unitdir=${libdir}/systemd/system])
+  [systemd_unitdir="${withval}"], [systemd_unitdir=${libdir}/systemd])
+
+AC_SUBST(systemd_unitdir)
 
 AC_OUTPUT([Makefile])
 
