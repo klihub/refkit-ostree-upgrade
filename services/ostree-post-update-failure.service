@@ -1,0 +1,11 @@
+[Unit]
+Description=Handling of post-update check failure
+DefaultDependencies=no
+Conflicts=shutdown.target
+Conflicts=rescue.service
+Conflicts=syslog.socket
+Before=shutdown.target
+
+[Service]
+ExecStart=/usr/bin/refkit-ostree post-upgrade-recovery
+Type=simple

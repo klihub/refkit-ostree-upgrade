@@ -1,0 +1,14 @@
+[Unit]
+Description=Perform any post-update checks.
+After=network.target
+ConditionPathExists=/var/.ostree.updated
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/refkit-ostree post-update-check
+# OnFailure=ostree-post-update-failure.target
+RemainAfterExit=Yes
+TimeoutSec=0
+
+[Install]
+WantedBy=multi-user.target
