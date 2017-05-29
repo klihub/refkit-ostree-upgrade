@@ -1,3 +1,4 @@
+bin_PROGRAMS =
 bin_SCRIPTS  = scripts/refkit-ostree
 servicedir   = ${systemd_unitdir}/system
 service_DATA = \
@@ -6,3 +7,13 @@ service_DATA = \
         services/ostree-post-update.service \
         services/ostree-post-update-failure.service \
         services/ostree-post-update-failure.target
+
+AM_CFLAGS = $(WARNING_CFLAGS) -DDATADIR="\"${datadir}\""
+
+# refkit-ostree-update
+bin_PROGRAMS += refkit-ostree-update
+
+refkit_ostree_update_SOURCES = src/refkit-ostree-update.c
+refkit_ostree_update_CFLAGS  = $(AM_CFLAGS) $(OSTREE_CFLAGS)
+refkit_ostree_update_LDADD   = $(OSTREE_LIBS)
+

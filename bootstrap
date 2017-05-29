@@ -1,8 +1,10 @@
 #!/bin/bash
 
 aclocal -I . && \
-    autoconf && \
-        automake --add-missing --copy
+    autoheader && \
+        libtoolize --copy --force && \
+            autoconf && \
+                automake --add-missing --copy
 
 status=$?
 
