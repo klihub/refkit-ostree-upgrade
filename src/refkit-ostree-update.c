@@ -179,7 +179,6 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
             "  -i, --check-interval         update check interval (in seconds)\n"
             "  -P, --post-apply-hook PATH   script to run after an update\n"
             "  -R, --reboot-hook PATH       script to request rebooting\n"
-            "  -I, --inhibit-hook PATH      shutdown inhibitor path\n"
             "  -l, --log LEVELS             set logging levels\n"
             "  -v, --verbose                increase loggin verbosity\n"
             "  -d, --debug [DOMAINS]        enable given debug domains or all\n"
@@ -392,36 +391,6 @@ static void updater_init(context_t *c)
 }
 
 
-static int updater_prepare(context_t *c)
-{
-    GCancellable *gcnc   = NULL;
-    GError       *gerr   = NULL;
-    gboolean      locked = FALSE;
-
-    if (c->sysroot == NULL)
-        c->sysroot = ostree_sysroot_new(NULL);
-
-    if (!ostree_sysroot_load(c->sysroot, gcnc, &gerr)) {
-        log_error("failed to load OSTree sysroot (%s)", gerr->message);
-        return -1;
-    }
-
-    if (!ostree_sysroot_try_lock(c->sysroot, &locked, &gerr)) {
-        log_error("failed to lock OSTree sysroot (%s)", gerr->message);
-        return -1;
-    }
-
-    return !!locked;
-}
-
-
-static void updater_finish(context_t *c)
-{
-    if (c->sysroot)
-        ostree_sysroot_unlock(c->sysroot);
-}
-
-
 static pid_t updater_invoke(char **argv, redirfd_t *rfd)
 {
     pid_t      pid;
@@ -453,10 +422,8 @@ static pid_t updater_invoke(char **argv, redirfd_t *rfd)
                         fd = -1;
             }
 
-            if (fd >= 0) {
-                log_debug("closing child fd %d", fd);
+            if (fd >= 0)
                 close(fd);
-            }
         }
 
         if (rfd != NULL) {
@@ -604,6 +571,66 @@ static void updater_allow_shutdown(context_t *c)
 }
 
 
+static int updater_prepare(context_t *c)
+{
+    GCancellable *gcnc   = NULL;
+    GError       *gerr   = NULL;
+    gboolean      locked = FALSE;
+
+    if (c->sysroot == NULL)
+        c->sysroot = ostree_sysroot_new(NULL);
+
+    if (!ostree_sysroot_load(c->sysroot, gcnc, &gerr))
+        goto load_failure;
+
+    if (!ostree_sysroot_try_lock(c->sysroot, &locked, &gerr))
+        goto lock_failure;
+
+    if (!locked)
+        return 0;
+
+    if (updater_block_shutdown(c) < 0)
+        goto block_failure;
+
+    c->u = ostree_sysroot_upgrader_new_for_os(c->sysroot, NULL, gcnc, &gerr);
+
+    if (c->u == NULL)
+        goto no_upgrader;
+
+    return 1;
+
+ load_failure:
+    log_error("failed to load OSTree sysroot (%s)", gerr->message);
+    return -1;
+
+ lock_failure:
+    log_error("failed to lock OSTree sysroot (%s)", gerr->message);
+    return -1;
+
+ block_failure:
+    log_error("failed to block shutdown");
+    return -1;
+
+ no_upgrader:
+    log_error("failed to create OSTree upgrader (%s)", gerr->message);
+    return -1;
+}
+
+
+static void updater_cleanup(context_t *c)
+{
+    if (c->sysroot)
+        ostree_sysroot_unlock(c->sysroot);
+
+    if (c->u) {
+        g_object_unref(c->u);
+        c->u = NULL;
+    }
+
+    updater_allow_shutdown(c);
+}
+
+
 static int updater_post_apply_hook(context_t *c, const char *o, const char *n)
 {
 #   define TIMEOUT 60
@@ -636,9 +663,11 @@ static int updater_post_apply_hook(context_t *c, const char *o, const char *n)
     if (pid <= 0)
         return -1;
 
+    log_info("waiting for post-apply hook (%s) to finish...", c->hook_apply);
+
     while ((status = waitpid(pid, &ec, WNOHANG)) != pid) {
-        if (cnt++ < 60 * 4)
-            usleep(250 * 1000);
+        if (cnt++ < TIMEOUT)
+            sleep(1);
         else
             break;
     }
@@ -652,7 +681,7 @@ static int updater_post_apply_hook(context_t *c, const char *o, const char *n)
     if (WEXITSTATUS(ec) != 0)
         goto hook_failure;
 
-    log_info("posts-apply hook (%s) succeeded", c->hook_apply);
+    log_info("post-apply hook (%s) succeeded", c->hook_apply);
     return 0;
 
  no_hook:
@@ -682,80 +711,149 @@ static int updater_post_apply_hook(context_t *c, const char *o, const char *n)
 
 static int updater_reboot_hook(context_t *c)
 {
-    log_info("running reboot hook %s...", c->hook_boot);
+#   define TIMEOUT 60
 
-    /* should for, and exec c->reboot_hook and waitpid for it */
-    return 0;   /* don't reboot */
+    char *argv[8];
+    pid_t pid;
+    int   status, ec, cnt;
+
+    if (!*c->hook_boot)
+        goto no_hook;
+
+    if (access(c->hook_boot, X_OK) < 0)
+        goto no_access;
+
+    log_info("running post-apply boot hook %s...", c->hook_boot);
+
+    argv[0] = (char *)c->hook_boot;
+    argv[1] = NULL;
+
+    pid = updater_invoke(argv, NULL);
+
+    if (pid < 0)
+        return -1;
+
+    log_info("waiting for boot hook (%s) to finish...", c->hook_boot);
+
+    cnt = 0;
+    while ((status = waitpid(pid, &ec, WNOHANG)) != pid) {
+        if (cnt++ < TIMEOUT)
+            sleep(1);
+        else
+            break;
+    }
+
+    if (status != pid)
+        goto timeout;
+
+    if (!WIFEXITED(ec))
+        goto hook_error;
+
+    if (WEXITSTATUS(ec) != 0)
+        goto hook_failure;
+
+    log_info("boot hook (%s) succeeded, exiting", c->hook_apply);
+    exit(0);
+
+ no_hook:
+    return 0;
+
+ no_access:
+    log_error("can't execute post-apply boot hook '%s'", c->hook_boot);
+    return -1;
+
+ timeout:
+    log_error("boot hook (%s) didn't finish in %d seconds",
+              c->hook_boot, TIMEOUT);
+    return -1;
+
+ hook_error:
+    log_error("boot hook (%s) exited abnormally", c->hook_boot);
+    return -1;
+
+ hook_failure:
+    log_error("boot hook (%s) failed with status %d", c->hook_boot,
+              WEXITSTATUS(ec));
+    return -1;
+
+#   undef TIMEOUT
+}
+
+
+static int updater_fetch(context_t *c)
+{
+    GCancellable *gcnc = NULL;
+    GError       *gerr = NULL;
+    int           flg  = 0;
+    int           changed;
+    const char   *src;
+
+    if (!(c->mode & UPDATER_MODE_FETCH)) {
+        flg = OSTREE_SYSROOT_UPGRADER_PULL_FLAGS_SYNTHETIC;
+        src = "local repository";
+    }
+    else
+        src = "server";
+
+    log_info("polling OSTree %s for available updates...", src);
+
+    if (!ostree_sysroot_upgrader_pull(c->u, 0, flg, NULL, &changed, gcnc, &gerr))
+        goto pull_failed;
+
+    if (!changed)
+        log_info("no updates pending");
+    else
+        log_info("updates fetched successfully");
+
+    return changed;
+
+ pull_failed:
+    log_error("failed to poll %s for updates (%s)", src, gerr->message);
+    if (!(c->mode & UPDATER_MODE_APPLY))         /* mimick stock ostree logic */
+        ostree_sysroot_cleanup(c->sysroot, NULL, NULL);
+    return -1;
+}
+
+
+static int updater_apply(context_t *c)
+{
+    GCancellable *gcnc = NULL;
+    GError       *gerr = NULL;
+
+    if (!(c->mode & UPDATER_MODE_APPLY))
+        return 0;
+
+    if (!ostree_sysroot_upgrader_deploy(c->u, gcnc, &gerr))
+        goto deploy_failure;
+
+    log_info("OSTree updates applied");
+
+    if (updater_post_apply_hook(c, NULL, NULL) < 0)
+        goto hook_failure;
+
+    return 1;
+
+ deploy_failure:
+    log_error("failed to deploy OSTree updates locally (%s)", gerr->message);
+    return -1;
+
+ hook_failure:
+    log_error("update post-apply hook failed");
+    return -1;
 }
 
 
 static int updater_run(context_t *c)
 {
-    OstreeSysrootUpgrader *u       = NULL;
-    int                    flg     = 0;
-    GCancellable          *gcnc    = NULL;
-    GError                *gerr    = NULL;
-    gboolean               changed = FALSE;
-    int                    status  = -1;
+    int status;
 
     if (updater_prepare(c) <= 0)
         return -1;
 
-    u = ostree_sysroot_upgrader_new_for_os(c->sysroot, NULL, gcnc, &gerr);
+    if ((status = updater_fetch(c)) > 0)
+        status = updater_apply(c);
 
-    if (u == NULL) {
-        log_error("failed to create OSTree upgrader (%s)", gerr->message);
-        goto out;
-    }
-
-    if (!(c->mode & UPDATER_MODE_FETCH))
-        flg = OSTREE_SYSROOT_UPGRADER_PULL_FLAGS_SYNTHETIC;
-
-    log_info("polling OSTree server for available updates...");
-
-    updater_block_shutdown(c);
-
-    if (!ostree_sysroot_upgrader_pull(u, 0, flg, NULL, &changed, gcnc, &gerr)) {
-        log_error("pull from OSTree server failed (%s)", gerr->message);
-
-        if (!(c->mode & UPDATER_MODE_APPLY)) /* mimick stock ostree logic */
-            ostree_sysroot_cleanup(c->sysroot, NULL, NULL);
-
-        goto out;
-    }
-
-    if (!changed) {
-        log_info("no updates available");
-        status = 0;
-    }
-    else {
-        if (!(c->mode & UPDATER_MODE_APPLY)) {
-            log_info("updates fetched and cached");
-            status = 1;
-        }
-        else {
-            log_info("updates fetched, applying...");
-            if (!ostree_sysroot_upgrader_deploy(u, gcnc, &gerr)) {
-                log_error("failed to apply OSTree updates (%s)", gerr->message);
-                goto out;
-            }
-            else
-                log_info("OSTree updates applied");
-
-            if (updater_post_apply_hook(c, NULL, NULL) < 0)
-                goto out;
-
-            status = 1;
-        }
-    }
-
- out:
-    if (u)
-        g_object_unref(u);
-
-    updater_allow_shutdown(c);
-
-    updater_finish(c);
+    updater_cleanup(c);
 
     return status;
 }
@@ -763,28 +861,34 @@ static int updater_run(context_t *c)
 
 static void updater_loop(context_t *c)
 {
-    int status, done;
+    int updated;
 
-    done = FALSE;
-    while (!done) {
-        status = updater_run(c);
+    /*
+     * Notes:
+     *
+     *   This is extremely simplistic now. Since ostree uses heavily
+     *   gobjects/GMmainLoop we could easily/perhaps should switch
+     *   to using GMainLoop.
+     */
+
+    for (;;) {
+        updated = updater_run(c);
 
         if (c->oneshot)
             break;
 
-        switch (status) {
+        switch (updated) {
         case 0:
+            /* no updates, wait for next poll time */
             sleep(c->interval);
-            break;
-        case 1:
-            sleep(c->interval);
-            if (c->mode & UPDATER_MODE_APPLY)
-                if (updater_reboot_hook(c) >= 1)
-                    done = TRUE;
             break;
 
+        case 1:
+            updater_reboot_hook(c); /* does not return on success */
+            exit(1);
+
         default:
-            sleep(15);
+            sleep(30);
             break;
         }
     }
@@ -810,22 +914,6 @@ int main(int argc, char *argv[])
 
     parse_cmdline(&c, argc, argv);
 
-#if 0
-    log_info("blocking shutdown...");
-    if (updater_block_shutdown(&c) < 0)
-        log_fatal("failed to block shutdown");
-    else
-        log_info("shutdown blocked");
-
-    sleep(5);
-
-    log_info("allowing shutdown...");
-    updater_allow_shutdown(&c);
-
-    sleep(5);
-    exit(0);
-#endif
-
     updater_init(&c);
     updater_loop(&c);
     updater_exit(&c);
@@ -833,113 +921,3 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#if 0
-
-
-static int update_init(context_t *c)
-{
-    GCancellable *cncl = NULL;
-    GError       *err  = NULL;
-
-    c->repo = ostree_repo_new_default();
-
-    if (!ostree_repo_open(c->repo, cncl, &err))
-        log_fatal("failed to open repository (%s)", err->message);
-
-    c->sysroot = ostree_sysroot_new(NULL);
-
-    if (!ostree_sysroot_load(c->sysroot, cncl, &err))
-        log_fatal("failed to load sysroot (%s)", err->message);
-
-    return 0;
-}
-
-static int update_fetch(context_t *c)
-{
-    OstreeSysrootUpgrader          *u;
-    OstreeSysrootUpgraderPullFlags  flags   = 0;
-    GCancellable                   *cncl    = NULL;
-    GError                         *err     = NULL;
-    gboolean                        changed = FALSE;
-    int                             status  = 0;
-
-    log_info("polling/fetching available updates...");
-
-    if (updater_lock(c) <= 0)
-        return -1;
-
-    u = ostree_sysroot_upgrader_new_for_os(c->sysroot, NULL, cncl, &err);
-
-    if (u == NULL)
-        log_fatal("failed to create OSTree upgrader (%s)", err->message);
-
-    log_info("polling OSTree updates...\n");
-    if (!ostree_sysroot_upgrader_pull(u,0,flags, NULL, &changed, cncl, &err)) {
-        log_error("poll failed (%s)\n", err->message);
-        ostree_sysroot_cleanup(c->sysroot, NULL, NULL);
-        status = -1;
-    }
-    else {
-        log_error("poll succeeded\n");
-        status = changed ? 1 : 0;
-    }
-
-    updater_unlock(c);
-
-    return status;
-}
-
-
-int main(int argc, char *argv[])
-{
-    context_t c;
-    int       status;
-
-    setlocale(LC_ALL, "");
-
-    g_set_prgname(argv[0]);
-    g_setenv("GIO_USE_VFS", "local", TRUE);
-    g_log_set_handler(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, log_handler, NULL);
-
-    for (;;) {
-        status = update_fetch(&c);
-
-        log_info("fetch status: %d\n", status);
-
-        switch (status) {
-        case 0:
-            printf("no updates...\n");
-            break;
-        case 1:
-            printf("pending updates fetched\n");
-            break;
-        default:
-            printf("failed to poll/fetch for udpates\n");
-            break;
-        }
-        sleep(60);
-    }
-}
-
-#endif
