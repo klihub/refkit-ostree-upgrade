@@ -53,7 +53,7 @@
 /* updater modes */
 enum {
     UPDATER_MODE_FETCH  = 0x1,               /* only fetch, don't apply */
-    UPDATER_MODE_APPLY  = 0x2,               /* apply cached updates */
+    UPDATER_MODE_APPLY  = 0x2,               /* don't fetch, only apply */
     UPDATER_MODE_UPDATE = 0x3,               /* fetch and apply updates */
 };
 
@@ -344,10 +344,14 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
     while ((opt = getopt_long(argc, argv, OPTIONS, options, NULL)) != -1) {
         switch (opt) {
         case 'F':
+            if (c->mode != UPDATER_MODE_UPDATE)
+                log_warn("multiple mode options used, ignoring previous...");
             c->mode = UPDATER_MODE_FETCH;
             break;
 
         case 'A':
+            if (c->mode != UPDATER_MODE_UPDATE)
+                log_warn("multiple mode options used, ignoring previous...");
             c->mode = UPDATER_MODE_APPLY;
             break;
 
