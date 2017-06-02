@@ -30,38 +30,67 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <string.h>
 #include <limits.h>
+#define _GNU_SOURCE                          /* getopt_long */
+#include <getopt.h>
 #include <locale.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#define _GNU_SOURCE                          /* getopt_long */
-#include <getopt.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
 
 #include <ostree-1/ostree.h>
 
 
-/* default hooks/scripts and updater interval */
+/* defaults */
 #define UPDATER_HOOK(path) DATADIR"/refkit-ostree/hooks/"path
 #define UPDATER_HOOK_APPLY UPDATER_HOOK("post-apply")
 #define UPDATER_HOOK_BOOT  UPDATER_HOOK("reboot")
 #define UPDATER_INTERVAL   (15 * 60)
+#define UPDATER_DISTRO     "refkit"
+#define UPDATER_PREFIX     "REFKIT_OSTREE"
 
 /* updater modes */
 enum {
+    UPDATER_MODE_DEFAULT,
     UPDATER_MODE_FETCH  = 0x1,               /* only fetch, don't apply */
     UPDATER_MODE_APPLY  = 0x2,               /* don't fetch, only apply */
     UPDATER_MODE_UPDATE = 0x3,               /* fetch and apply updates */
+    UPDATER_MODE_ENTRIES,                    /* parse and show boot entries */
+    UPDATER_MODE_RUNNING,                    /* show running entry */
+    UPDATER_MODE_LATEST,                     /* show running entry */
+    UPDATER_MODE_PATCH,                      /* patch /proc/cmdline */
 };
+
+/* printing modes */
+enum {
+    PRINT_HUMAN_READABLE,                    /* for human/primate consumption */
+    PRINT_SHELL_EVAL,                        /* for shell eval */
+    PRINT_SHELL_EXPORT,                      /* for shell eval, exporting */
+};
+
+/* a boot entry */
+typedef struct {
+    int    id;                               /* 0/1 entry id */
+    int    version;                          /* entry version */
+    char  *options;                          /* entry options */
+    char  *boot;                             /* boot path */
+    char  *deployment;                       /*   resolved to deployment */
+    dev_t  device;                           /* device number */
+    ino_t  inode;                            /* inode number */
+} boot_entry_t;
 
 /* updater runtime context */
 typedef struct {
     int                    mode;             /* mode of operation */
     int                    interval;         /* update check interval */
     int                    oneshot;          /* run once, then exit */
+    const char            *distro;           /* distro name */
     OstreeRepo            *repo;             /* ostree repo instance */
     OstreeSysroot         *sysroot;          /* ostree sysroot instance */
     OstreeSysrootUpgrader *u;                /* ostree sysroot upgrader */
@@ -70,6 +99,12 @@ typedef struct {
     int                    inhibit_fd;       /* shutdown inhibitor pid */
     int                    inhibit_pid;      /* active inhibitor process */
     const char            *argv0;            /* us... */
+    boot_entry_t           entries[2];       /* boot entries */
+    int                    nentry;
+    int                    latest;           /* latest boot entry */
+    int                    running;          /* running boot entry */
+    int                    print;            /* var/setup printing mode */
+    const char            *prefix;
 } context_t;
 
 /* fd redirection for child process */
@@ -180,11 +215,47 @@ static void set_defaults(context_t *c, const char *argv0)
         log_mask = UPDATER_LOG_DAEMON;
 
     memset(c, 0, sizeof(*c));
-    c->mode       = UPDATER_MODE_UPDATE;
+    c->mode       = UPDATER_MODE_DEFAULT;
     c->interval   = UPDATER_INTERVAL;
-    c->argv0      = argv0;
     c->hook_apply = UPDATER_HOOK_APPLY;
     c->hook_boot  = UPDATER_HOOK_BOOT;
+    c->argv0      = argv0;
+    c->distro     = UPDATER_DISTRO;
+    c->prefix     = UPDATER_PREFIX;
+    c->nentry     = 0;
+    c->latest     = -1;
+    c->running    = -1;
+}
+
+
+#define OPTION_FETCH   "-F/--fetch-only"
+#define OPTION_APPLY   "-A/--apply-only"
+#define OPTION_ENTRIES "-b/boot-entries"
+#define OPTION_RUNNING "-r/running-entry"
+#define OPTION_LATEST  "-L/latest-entry"
+#define OPTION_PATCH   "-p/patch-procfs"
+
+static const char *mode_option(int mode)
+{
+    switch (mode) {
+    case UPDATER_MODE_FETCH:   return OPTION_FETCH;
+    case UPDATER_MODE_APPLY:   return OPTION_APPLY;
+    case UPDATER_MODE_ENTRIES: return OPTION_ENTRIES;
+    case UPDATER_MODE_RUNNING: return OPTION_RUNNING;
+    case UPDATER_MODE_LATEST:  return OPTION_LATEST;
+    case UPDATER_MODE_PATCH:   return OPTION_PATCH;
+    default:                   return "WTF?";
+    }
+}
+
+
+static void set_mode(context_t *c, int mode)
+{
+    if (c->mode)
+        log_warn("multiple modes specified (%s, %s), using last one",
+                 mode_option(c->mode), mode_option(mode));
+
+    c->mode = mode;
 }
 
 
@@ -202,6 +273,13 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
     fprintf(stderr, "usage: %s [options]\n"
             "\n"
             "The possible options are:\n"
+            "  -b, --boot-entries           list boot entries\n"
+            "  -r, --running-entry          show running entry\n"
+            "  -L, --latest-entry           show latest local available entry\n"
+            "  -p, --patch-procfs           patch /proc/cmdline\n"
+            "  -s, --shell                  list/show as shell assignment\n"
+            "  -S, --shell-export           use export in shell assignments\n"
+            "  -V, --prefix                 variable prefix in assignments\n"
             "  -F, --fetch-only             fetch without applying updates\n"
             "  -A, --apply-only             don't fetch, apply cached updates\n"
             "  -O, --one-shot               run once, then exit\n"
@@ -315,10 +393,243 @@ static void enable_debug_domains(char **domains)
 }
 
 
+static int parse_boot_entry(FILE *fp, boot_entry_t *b)
+{
+    char line[512], path[PATH_MAX], *p, *e;
+    int  l;
+
+    b->version = 0;
+    b->options = b->boot = b->deployment = NULL;
+    b->device  = 0;
+    b->inode   = 0;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        log_debug("read config entry line '%s'");
+
+        if (!strncmp(line, "options ", 8)) {
+            p = line + 8;
+            e = strchr(line, '\n');
+            l = e ? e - p : (int)strlen(p);
+
+            if ((b->options = malloc(l + 1)) == NULL)
+                goto nomem;
+
+            strncpy(b->options, p, l);
+            b->options[l] = '\0';
+
+            if (b->version)
+                break;
+            else
+                continue;
+        }
+
+        if (!strncmp(line, "version ", 8)) {
+            p = line + 8;
+
+            b->version = (int)strtoul(p, NULL, 10);
+
+            if (b->options)
+                break;
+            else
+                continue;
+        }
+    }
+
+    if (!b->version)
+        goto missing_version;
+
+    if (b->options == NULL)
+        goto missing_options;
+
+    if ((p = strstr(b->options, "ostree=")) == NULL)
+        goto missing_ostree;
+
+    p += 7;
+
+    if ((e = strchr(p, ' ')) == NULL)
+        l = strlen(p);
+    else
+        l = e - p;
+
+    snprintf(path, sizeof(path), "%*.*s", l, l, p);
+
+    if ((b->boot = strdup(path)) == NULL)
+        goto nomem;
+
+    return 0;
+
+ missing_version:
+    log_error("missing config entry 'version'");
+    return -1;
+
+ missing_options:
+    log_error("missing config entry 'options'");
+    return -1;
+
+ missing_ostree:
+    log_error("missing ostree-entry in 'options'");
+    return -1;
+
+ nomem:
+    return -1;
+}
+
+
+static int resolve_boot_path(boot_entry_t *b)
+{
+    struct stat st;
+    char        path[PATH_MAX], pwd[PATH_MAX], *p;
+
+    if (stat(p = b->boot, &st) < 0 && errno == ENOENT) {
+        snprintf(path, sizeof(path), "/rootfs/%s", b->boot);
+
+        if (stat(p = path, &st) < 0)
+            goto invalid_path;
+    }
+
+    if (getcwd(pwd, sizeof(pwd)) == NULL)
+        goto resolve_failed;
+
+    if (chdir(p) < 0)
+        goto resolve_failed;
+
+    if (getcwd(path, sizeof(path)) == NULL)
+        goto resolve_failed;
+
+    chdir(pwd);
+
+    if (!strncmp(path, "/rootfs/", 8))
+        p = path + 8;
+    else
+        p = path;
+
+    if (!strncmp(path, "/sysroot/", 9))
+        p += 9;
+
+    b->deployment = strdup(p);
+
+    if (b->deployment == NULL)
+        goto nomem;
+
+    if (stat(path, &st) < 0)
+        goto resolve_failed;
+
+    b->device = st.st_dev;
+    b->inode  = st.st_ino;
+
+    return 0;
+
+ invalid_path:
+    log_error("failed to resolve boot path '%s'", p);
+    return -1;
+
+ resolve_failed:
+    log_error("failed to resolve boot symlink '%s' to deployment", p);
+ nomem:
+    return -1;
+}
+
+
+static int get_boot_entries(context_t *c)
+{
+    boot_entry_t *buf  = c->entries;
+    size_t        size = sizeof(c->entries) / sizeof(c->entries[0]);
+    struct stat   root;
+    char          conf[PATH_MAX], *base;
+    boot_entry_t *b;
+    int           latest, i, status;
+    FILE         *fp = NULL;
+
+    if (c->nentry > 0)
+        return c->nentry;
+
+    if (access(base = "/boot/loader/entries", X_OK) < 0) {
+        if (errno == ENOENT) {
+            if (access(base = "/rootfs/boot/loader/entries", X_OK) < 0) {
+                if (errno == ENOENT)
+                    goto no_entries;
+
+                goto get_failed;
+            }
+        }
+        else
+            goto get_failed;
+    }
+
+    if (stat("/", &root) < 0)
+        memset(&root, 0, sizeof(root));
+
+    c->latest = c->running = -1;
+
+    for (i = 0, b = buf; i < 2; i++, b++) {
+        if (i >= (int)size)
+            goto no_buf;
+
+        memset(b, 0, sizeof(*b));
+        b->id = i;
+
+        snprintf(conf, sizeof(conf), "%s/ostree-%s-%d.conf", base, c->distro, i);
+
+        if ((fp = fopen(conf, "r")) == NULL) {
+            if (i == 0)
+                goto get_failed;
+            else
+                break;
+        }
+
+        log_debug("parsing config file '%s'...", conf);
+        status = parse_boot_entry(fp, b);
+
+        fclose(fp);
+        fp = NULL;
+
+        if (status < 0)
+            goto invalid_entry;
+
+        if (resolve_boot_path(b) < 0)
+            goto invalid_entry;
+
+        if (b->version > latest) {
+            c->latest = i;
+            latest = b->version;
+        }
+
+        if (b->device == root.st_dev && b->inode == root.st_ino)
+            c->running = i;
+    }
+
+    if (i < (int)size - 1)
+        memset(buf + i, 0, sizeof(*buf));
+
+    return (c->nentry = i);
+
+ no_entries:
+ get_failed:
+    log_error("failed to find any boot loader entries");
+    if (fp)
+        fclose(fp);
+    return -1;
+
+ invalid_entry:
+    log_error("invalid entry, failed to parse '%s'", conf);
+
+ no_buf:
+    errno = ENOBUFS;
+    return -1;
+}
+
+
 static void parse_cmdline(context_t *c, int argc, char **argv)
 {
-#   define OPTIONS "-FAOi:P:R:l:vd::h"
+#   define OPTIONS "-brLpsSVFAOi:P:R:l:vd::h"
     static struct option options[] = {
+        { "boot-entries"   , no_argument      , NULL, 'b' },
+        { "running-entry"  , no_argument      , NULL, 'r' },
+        { "latest-entry"   , no_argument      , NULL, 'L' },
+        { "patch-procfs"   , no_argument      , NULL, 'p' },
+        { "shell"          , no_argument      , NULL, 's' },
+        { "shell-export"   , no_argument      , NULL, 'S' },
+        { "prefix"         , required_argument, NULL, 'V' },
         { "fetch-only"     , no_argument      , NULL, 'F' },
         { "apply-only"     , no_argument      , NULL, 'A' },
         { "one-shot"       , no_argument      , NULL, 'O' },
@@ -343,16 +654,36 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
 
     while ((opt = getopt_long(argc, argv, OPTIONS, options, NULL)) != -1) {
         switch (opt) {
+        case 'b':
+            set_mode(c, UPDATER_MODE_ENTRIES);
+            break;
+
+        case 'r':
+            set_mode(c, UPDATER_MODE_RUNNING);
+            break;
+
+        case 'p':
+            set_mode(c, UPDATER_MODE_PATCH);
+            break;
+
+        case 's':
+            c->print = PRINT_SHELL_EVAL;
+            break;
+
+        case 'S':
+            c->print = PRINT_SHELL_EXPORT;
+            break;
+
+        case 'V':
+            c->prefix = optarg;
+            break;
+
         case 'F':
-            if (c->mode != UPDATER_MODE_UPDATE)
-                log_warn("multiple mode options used, ignoring previous...");
-            c->mode = UPDATER_MODE_FETCH;
+            set_mode(c, UPDATER_MODE_FETCH);
             break;
 
         case 'A':
-            if (c->mode != UPDATER_MODE_UPDATE)
-                log_warn("multiple mode options used, ignoring previous...");
-            c->mode = UPDATER_MODE_APPLY;
+            set_mode(c, UPDATER_MODE_APPLY);
             break;
 
         case 'O':
@@ -401,6 +732,9 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
         }
     }
 #undef OPTIONS
+
+    if (!c->mode)
+        c->mode = UPDATER_MODE_UPDATE;
 
     if (vmask && lmask)
         log_warn("both -v and -l options used to change logging level...");
@@ -935,6 +1269,206 @@ static void updater_exit(context_t *c)
 }
 
 
+static void print_entries(context_t *c)
+{
+    boot_entry_t *e;
+    int           i;
+    const char   *exp;
+
+    if (get_boot_entries(c) < 0)
+        exit(1);
+
+    exp = (c->print == PRINT_SHELL_EXPORT ? "export " : "");
+
+    if (c->print != PRINT_HUMAN_READABLE) {
+        printf("%s%s_BOOT_ENTRIES=%d\n", exp, c->prefix, c->nentry);
+        printf("%s%s_RUNNING_ENTRY=%d\n", exp, c->prefix, c->running);
+        printf("%s%s_LATEST_ENTRY=%d\n", exp, c->prefix, c->latest);
+    }
+
+    for (i = 0, e = c->entries; i < c->nentry; i++, e++) {
+        switch (c->print) {
+        case PRINT_HUMAN_READABLE:
+        default:
+            printf("boot entry #%d:\n", i);
+            printf("            id: %d\n", e->id);
+            printf("       version: %d\n", e->version);
+            printf("       options: '%s'\n", e->options);
+            printf("          boot: '%s'\n", e->boot);
+            printf("    deployment: '%s'\n", e->deployment);
+            printf("       dev/ino: 0x%lx/0x%lx\n", e->device, e->inode);
+            break;
+
+        case PRINT_SHELL_EVAL:
+        case PRINT_SHELL_EXPORT:
+            printf("%s%s_BOOT%d_VERSION=%d\n", exp, c->prefix, i, e->version);
+            printf("%s%s_BOOT%d_OPTIONS='%s'\n", exp, c->prefix, i, e->options);
+            printf("%s%s_BOOT%d_PATH='%s'\n", exp, c->prefix, i, e->deployment);
+            printf("%s%s_BOOT%d_DEVICE=0x%lx\n", exp, c->prefix, i, e->device);
+            printf("%s%s_BOOT%d_INODE=%lu\n", exp, c->prefix, i, e->inode);
+            break;
+        }
+    }
+
+    exit(0);
+}
+
+
+static void print_running(context_t *c)
+{
+    boot_entry_t *e;
+    const char   *exp;
+
+    if (get_boot_entries(c) < 0)
+        exit(1);
+
+    if (c->running < 0)
+        exit(1);
+
+    e   = c->entries + c->running;
+    exp = (c->print == PRINT_SHELL_EXPORT ? "export " : "");
+
+    switch (c->print) {
+    case PRINT_HUMAN_READABLE:
+    default:
+        printf("running entry #%d:\n", c->running);
+        printf("            id: %d\n", e->id);
+        printf("       version: %d\n", e->version);
+        printf("       options: '%s'\n", e->options);
+        printf("          boot: '%s'\n", e->boot);
+        printf("    deployment: '%s'\n", e->deployment);
+        printf("       dev/ino: 0x%lx/0x%lx\n", e->device, e->inode);
+        break;
+
+    case PRINT_SHELL_EVAL:
+    case PRINT_SHELL_EXPORT:
+        printf("%s%s_BOOTED_VERSION=%d\n", exp, c->prefix, e->version);
+        printf("%s%s_BOOTED_OPTIONS='%s'\n", exp, c->prefix, e->options);
+        printf("%s%s_BOOTED_PATH='%s'\n", exp, c->prefix, e->deployment);
+        printf("%s%s_BOOTED_DEVICE=0x%lx\n", exp, c->prefix, e->device);
+        printf("%s%s_BOOTED_INODE=%lu\n", exp, c->prefix, e->inode);
+        break;
+    }
+
+    exit(0);
+}
+
+
+static void print_latest(context_t *c)
+{
+    boot_entry_t *e;
+    const char   *exp;
+
+    if (get_boot_entries(c) < 0)
+        exit(1);
+
+    if (c->running < 0)
+        exit(1);
+
+    e   = c->entries + c->running;
+    exp = (c->print == PRINT_SHELL_EXPORT ? "export " : "");
+
+    switch (c->print) {
+    case PRINT_HUMAN_READABLE:
+    default:
+        printf("running entry #%d:\n", c->running);
+        printf("            id: %d\n", e->id);
+        printf("       version: %d\n", e->version);
+        printf("       options: '%s'\n", e->options);
+        printf("          boot: '%s'\n", e->boot);
+        printf("    deployment: '%s'\n", e->deployment);
+        printf("       dev/ino: 0x%lx/0x%lx\n", e->device, e->inode);
+        break;
+
+    case PRINT_SHELL_EVAL:
+    case PRINT_SHELL_EXPORT:
+        printf("%s%s_LATEST_VERSION=%d\n", exp, c->prefix, e->version);
+        printf("%s%s_LATEST_OPTIONS='%s'\n", exp, c->prefix, e->options);
+        printf("%s%s_LATEST_PATH='%s'\n", exp, c->prefix, e->deployment);
+        printf("%s%s_LATEST_DEVICE=0x%lx\n", exp, c->prefix, e->device);
+        printf("%s%s_LATEST_INODE=%lu\n", exp, c->prefix, e->inode);
+        break;
+    }
+
+    exit(0);
+}
+
+
+static void patch_procfs(context_t *c)
+{
+    boot_entry_t  entries[3], *boot;
+    char          cmdline[4096], *p;
+    const char   *orig, *patched;
+    int           n, l, cnt, fd, nl;
+
+    if (get_boot_entries(c) < 0)
+        exit(1);
+
+    if (c->running < 0)
+        exit(1);
+
+    boot = entries + c->running;
+
+    if ((fd = open(orig = "/proc/cmdline", O_RDONLY)) < 0)
+        exit(1);
+
+    if ((n = read(fd, cmdline, sizeof(cmdline))) < 0)
+        exit(1);
+
+    close(fd);
+
+    if (n >= (int)sizeof(cmdline) - 1)
+        exit(1);
+
+    nl = 0;
+    while (n > 0 && cmdline[n - 1] == '\n') {
+        n--;
+        nl = 1;
+    }
+
+    cmdline[n] = '\0';
+
+    if (strstr(cmdline, " ostree=") || strstr(cmdline, "ostree="))
+        exit(0);
+
+    l = sizeof(cmdline) - n - 1;
+
+    p   = cmdline + n;
+    cnt = snprintf(p, l, " ostree=%s%s", boot->boot, nl ? "\n" : "");
+
+    if (cnt < 0 || cnt > l)
+        exit(1);
+
+    n += cnt;
+
+    fd = open(patched = "/run/cmdline.patched",
+              O_CREAT | O_TRUNC | O_WRONLY, 0644);
+
+    if (fd < 0)
+        exit(1);
+
+    p = cmdline;
+    l = n;
+    while (l > 0) {
+        n = write(fd, p, l);
+
+        if (n < 0 && !(errno == EINTR || errno == EAGAIN))
+            exit(1);
+
+        p += n;
+        l -= n;
+    }
+
+    close(fd);
+
+    if (mount(patched, orig, NULL, MS_BIND|MS_RDONLY, NULL) < 0)
+        exit(1);
+
+    unlink(patched);
+    exit(0);
+}
+
+
 int main(int argc, char *argv[])
 {
     context_t c;
@@ -947,9 +1481,34 @@ int main(int argc, char *argv[])
 
     parse_cmdline(&c, argc, argv);
 
-    updater_init(&c);
-    updater_loop(&c);
-    updater_exit(&c);
+    switch (c.mode) {
+    case UPDATER_MODE_ENTRIES:
+        print_entries(&c);
+        break;
+
+    case UPDATER_MODE_RUNNING:
+        print_running(&c);
+        break;
+
+    case UPDATER_MODE_LATEST:
+        print_latest(&c);
+        break;
+
+    case UPDATER_MODE_PATCH:
+        patch_procfs(&c);
+        break;
+
+    case UPDATER_MODE_FETCH:
+    case UPDATER_MODE_APPLY:
+    case UPDATER_MODE_UPDATE:
+        updater_init(&c);
+        updater_loop(&c);
+        updater_exit(&c);
+        break;
+
+    default:
+        exit(-1);
+    }
 
     return 0;
 }
