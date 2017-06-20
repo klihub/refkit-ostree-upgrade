@@ -662,6 +662,10 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
             set_mode(c, UPDATER_MODE_RUNNING);
             break;
 
+        case 'L':
+            set_mode(c, UPDATER_MODE_LATEST);
+            break;
+
         case 'p':
             set_mode(c, UPDATER_MODE_PATCH);
             break;
