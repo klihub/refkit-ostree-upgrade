@@ -621,7 +621,7 @@ static int get_boot_entries(context_t *c)
 
 static void parse_cmdline(context_t *c, int argc, char **argv)
 {
-#   define OPTIONS "-brLpsSVFAOi:P:R:l:vd::h"
+#   define OPTIONS "-brLpsSV:FAOi:P:R:l:vd::h"
     static struct option options[] = {
         { "boot-entries"   , no_argument      , NULL, 'b' },
         { "running-entry"  , no_argument      , NULL, 'r' },
