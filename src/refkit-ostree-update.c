@@ -574,7 +574,7 @@ static int get_boot_entries(context_t *c)
     if (stat("/", &root) < 0)
         memset(&root, 0, sizeof(root));
 
-    c->latest = c->running = -1;
+    c->latest = c->running = latest = -1;
 
     for (i = 0, b = buf; i < 2; i++, b++) {
         if (i >= (int)size)
@@ -1051,6 +1051,7 @@ static int updater_post_apply_hook(context_t *c, const char *o, const char *n)
 
     log_info("waiting for post-apply hook (%s) to finish...", c->hook_apply);
 
+    cnt = 0;
     while ((status = waitpid(pid, &ec, WNOHANG)) != pid) {
         if (cnt++ < TIMEOUT)
             sleep(1);
