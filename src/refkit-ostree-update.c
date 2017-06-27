@@ -413,8 +413,12 @@ static int parse_boot_entry(FILE *fp, boot_entry_t *b)
     char line[512], path[PATH_MAX], *p, *e;
     int  l;
 
-    b->version = 0;
+    free(b->options);
+    free(b->boot);
+    free(b->deployment);
     b->options = b->boot = b->deployment = NULL;
+
+    b->version = 0;
     b->device  = 0;
     b->inode   = 0;
 
@@ -1206,6 +1210,8 @@ static int updater_apply(context_t *c)
 {
     GCancellable *gcnc = NULL;
     GError       *gerr = NULL;
+    const char   *prev = NULL;
+    const char   *curr = NULL;
 
     if (!(c->mode & UPDATER_MODE_APPLY))
         return 0;
@@ -1215,13 +1221,29 @@ static int updater_apply(context_t *c)
 
     log_info("OSTree updates applied");
 
-    if (updater_post_apply_hook(c, NULL, NULL) < 0)
+    if (get_boot_entries(c) < 0 || c->latest < 0)
+        goto entry_failure;
+
+    if (c->running >= 0)
+        prev = c->entries[c->running].deployment;
+    else
+        prev = "";
+
+    curr = c->entries[c->latest].deployment;
+
+    log_info("updated from %s to %s", *prev ? prev : "unknown", curr);
+
+    if (updater_post_apply_hook(c, prev, curr) < 0)
         goto hook_failure;
 
     return 1;
 
  deploy_failure:
     log_error("failed to deploy OSTree updates locally (%s)", gerr->message);
+    return -1;
+
+ entry_failure:
+    log_error("failed to determine post-update boot entries");
     return -1;
 
  hook_failure:
