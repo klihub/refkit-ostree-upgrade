@@ -262,6 +262,7 @@ static void set_mode(context_t *c, int mode)
 static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
 {
     va_list ap;
+    context_t c;
 
     if (fmt != NULL) {
         va_start(ap, fmt);
@@ -291,6 +292,20 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
             "  -d, --debug [DOMAINS]        enable given debug domains or all\n"
             "  -h, --help                   print this help on usage\n",
             argv0);
+
+    set_defaults(&c, argv0);
+
+    fprintf(stderr, "\nThe defaults are:\n"
+            "  distro name: %s\n"
+            "  post-apply hook: %s\n"
+            "  boot hook: %s\n"
+            "  shell variable prefix: %s\n"
+            "  check interval: %d\n",
+            c.distro,
+            c.hook_apply,
+            c.hook_boot,
+            c.prefix,
+            c.interval);
 
     exit(exit_code);
 }
