@@ -1,5 +1,9 @@
+HOOK_DIR  = ${datadir}/${PACKAGE_NAME}/hooks
+AM_CFLAGS = $(WARNING_CFLAGS) -DHOOK_DIR="\"${HOOK_DIR}\""
+
 bin_PROGRAMS =
 bin_SCRIPTS  = scripts/refkit-ostree
+
 servicedir   = ${systemd_unitdir}/system
 service_DATA = \
 	services/ostree-patch-proc-cmdline.service \
@@ -7,9 +11,6 @@ service_DATA = \
         services/ostree-post-update.service \
         services/ostree-post-update-failure.service \
         services/ostree-post-update-failure.target
-
-HOOK_DIR  = ${datadir}/${PACKAGE_NAME}/hooks
-AM_CFLAGS = $(WARNING_CFLAGS) -DDATADIR="\"${datadir}\""
 
 # refkit-ostree-update
 bin_PROGRAMS += refkit-ostree-update

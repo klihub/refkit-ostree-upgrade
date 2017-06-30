@@ -48,7 +48,7 @@
 
 
 /* defaults */
-#define UPDATER_HOOK(path) DATADIR"/refkit-ostree/hooks/"path
+#define UPDATER_HOOK(path) HOOK_DIR"/"path
 #define UPDATER_HOOK_APPLY UPDATER_HOOK("post-apply")
 #define UPDATER_HOOK_BOOT  UPDATER_HOOK("reboot")
 #define UPDATER_INTERVAL   (15 * 60)
