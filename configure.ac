@@ -4,7 +4,7 @@
 
 AC_PREREQ(2.59)
 
-AC_INIT([ostree-upgrade], [0.0.0], [BUG-REPORT-ADDRESS])
+AC_INIT([refkit-ostree], [0.0.0], [BUG-REPORT-ADDRESS])
 
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_HEADER([src/config.h])
