@@ -1,0 +1,15 @@
+#!/bin/sh
+
+HOOK_DIR=$0.d
+
+for h in $HOOK_DIR/[0-9]*-*; do
+    if [ -e $h -a -x $h ]; then
+        $h $*
+        status=$?
+        if [ $status != 0 ]; then
+            exit $?
+        fi
+    fi
+done
+
+exit 0
