@@ -177,16 +177,15 @@ static void log_handler(const gchar *domain, GLogLevelFlags level,
                         const gchar *message, gpointer user_data)
 {
     static int map[] = {
-        [G_LOG_LEVEL_CRITICAL]  = UPDATER_LOG_FATAL,
-        [G_LOG_LEVEL_ERROR]     = UPDATER_LOG_ERROR,
-        [G_LOG_LEVEL_WARNING]   = UPDATER_LOG_WARN,
-        [G_LOG_LEVEL_MESSAGE]   = UPDATER_LOG_INFO,
-        [G_LOG_LEVEL_INFO]      = UPDATER_LOG_INFO,
-        [G_LOG_LEVEL_DEBUG]     = UPDATER_LOG_DEBUG,
+        [G_LOG_LEVEL_CRITICAL] = UPDATER_LOG_FATAL,
+        [G_LOG_LEVEL_ERROR]    = UPDATER_LOG_ERROR,
+        [G_LOG_LEVEL_WARNING]  = UPDATER_LOG_WARN,
+        [G_LOG_LEVEL_MESSAGE]  = UPDATER_LOG_INFO,
+        [G_LOG_LEVEL_INFO]     = UPDATER_LOG_INFO,
+        [G_LOG_LEVEL_DEBUG]    = UPDATER_LOG_DEBUG,
     };
     int fatal, lvl;
 
-    UNUSED_VAR(domain);
     UNUSED_VAR(user_data);
 
     fatal  = level & G_LOG_FLAG_FATAL;
@@ -201,7 +200,7 @@ static void log_handler(const gchar *domain, GLogLevelFlags level,
         lvl = map[level];
 
     if (lvl == UPDATER_LOG_DEBUG)
-        log_debug("[%s] %s", message);
+        log_debug("[%s] %s", domain, message);
     else
         log_msg(lvl, "%s", message);
 }
