@@ -46,7 +46,6 @@
 
 #include <ostree-1/ostree.h>
 
-
 /* defaults */
 #define UPDATER_HOOK(path) HOOK_DIR"/"path
 #define UPDATER_HOOK_APPLY UPDATER_HOOK("post-apply")
@@ -65,6 +64,7 @@ enum {
     UPDATER_MODE_RUNNING,                    /* show running entry */
     UPDATER_MODE_LATEST,                     /* show running entry */
     UPDATER_MODE_PATCH,                      /* patch /proc/cmdline */
+    UPDATER_MODE_PREPARE,                    /* prepare root from initramfs */
 };
 
 /* printing modes */
@@ -113,6 +113,14 @@ typedef struct {
     int child;                               /* dupped to this one */
 } redirfd_t;
 
+/* a file/directory, potentially under a potentially prefixed root */
+typedef struct {
+    const char *prefix;
+    const char *root;
+    const char *path;
+} path_t;
+
+
 /* log levels, current log level */
 enum {
     UPDATER_LOG_NONE    = 0x00,
@@ -129,7 +137,10 @@ enum {
 static int log_mask;
 
 /* logging macros */
-#define log_fatal(...) log_msg(UPDATER_LOG_FATAL, __VA_ARGS__)
+#define log_fatal(...) do {                      \
+        log_msg(UPDATER_LOG_FATAL, __VA_ARGS__); \
+        exit(1);                                 \
+    } while (0)
 #define log_error(...) log_msg(UPDATER_LOG_ERROR, __VA_ARGS__)
 #define log_warn(...)  log_msg(UPDATER_LOG_WARN , __VA_ARGS__)
 #define log_info(...)  log_msg(UPDATER_LOG_INFO , __VA_ARGS__)
@@ -173,6 +184,7 @@ static void log_msg(int lvl, const char *fmt, ...)
 }
 
 
+#ifdef __REFKIT_UPDATER__
 static void log_handler(const gchar *domain, GLogLevelFlags level,
                         const gchar *message, gpointer user_data)
 {
@@ -204,6 +216,7 @@ static void log_handler(const gchar *domain, GLogLevelFlags level,
     else
         log_msg(lvl, "%s", message);
 }
+#endif
 
 
 static void set_defaults(context_t *c, const char *argv0)
@@ -233,6 +246,7 @@ static void set_defaults(context_t *c, const char *argv0)
 #define OPTION_RUNNING "-r/running-entry"
 #define OPTION_LATEST  "-L/latest-entry"
 #define OPTION_PATCH   "-p/patch-procfs"
+#define OPTION_PREPARE "-I/--prepare-root"
 
 static const char *mode_option(int mode)
 {
@@ -243,6 +257,7 @@ static const char *mode_option(int mode)
     case UPDATER_MODE_RUNNING: return OPTION_RUNNING;
     case UPDATER_MODE_LATEST:  return OPTION_LATEST;
     case UPDATER_MODE_PATCH:   return OPTION_PATCH;
+    case UPDATER_MODE_PREPARE: return OPTION_PREPARE;
     default:                   return "WTF?";
     }
 }
@@ -277,15 +292,18 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
             "  -r, --running-entry          show running entry\n"
             "  -L, --latest-entry           show latest local available entry\n"
             "  -p, --patch-procfs           patch /proc/cmdline\n"
+            "  -I, --prepare-root           prepare root (from initramfs)\n"
             "  -s, --shell                  list/show as shell assignment\n"
             "  -S, --shell-export           use export in shell assignments\n"
             "  -V, --prefix                 variable prefix in assignments\n"
+#ifdef __REFKIT_UPDATER__
             "  -F, --fetch-only             fetch without applying updates\n"
             "  -A, --apply-only             don't fetch, apply cached updates\n"
             "  -O, --one-shot               run once, then exit\n"
             "  -i, --check-interval         update check interval (in seconds)\n"
             "  -P, --post-apply-hook PATH   script to run after an update\n"
             "  -R, --reboot-hook PATH       script to request rebooting\n"
+#endif
             "  -l, --log LEVELS             set logging levels\n"
             "  -v, --verbose                increase loggin verbosity\n"
             "  -d, --debug [DOMAINS]        enable given debug domains or all\n"
@@ -294,6 +312,7 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
 
     set_defaults(&c, argv0);
 
+#ifdef __REFKIT_UPDATER__
     fprintf(stderr, "\nThe defaults are:\n"
             "  distro name: %s\n"
             "  post-apply hook: %s\n"
@@ -305,6 +324,7 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
             c.hook_boot,
             c.prefix,
             c.interval);
+#endif
 
     exit(exit_code);
 }
@@ -517,12 +537,12 @@ static int resolve_boot_path(boot_entry_t *b)
     chdir(pwd);
 
     if (!strncmp(path, "/rootfs/", 8))
-        p = path + 8;
+        p = path + 7;
     else
         p = path;
 
     if (!strncmp(path, "/sysroot/", 9))
-        p += 9;
+        p += 8;
 
     b->deployment = strdup(p);
 
@@ -639,32 +659,44 @@ static int get_boot_entries(context_t *c)
 
 static void parse_cmdline(context_t *c, int argc, char **argv)
 {
-#   define OPTIONS "-brLpsSV:FAOi:P:R:l:vd::h"
+#ifdef __REFKIT_UPDATER__
+#   define UPDATER_OPTIONS "FAOi:P:R:"
+#   define UPDATER_ENTRIES \
+        { "fetch-only"     , no_argument      , NULL, 'F' }, \
+        { "apply-only"     , no_argument      , NULL, 'A' }, \
+        { "one-shot"       , no_argument      , NULL, 'O' }, \
+        { "check-interval" , required_argument, NULL, 'i' }, \
+        { "post-apply-hook", required_argument, NULL, 'P' }, \
+        { "reboot-hook"    , required_argument, NULL, 'R' }
+#else
+#    define UPDATER_OPTIONS ""
+#    define UPDATER_ENTRIES { NULL, 0, NULL, 0 }
+#endif
+
+#   define OPTIONS "-brLpIsSV:l:vd::h"UPDATER_OPTIONS
     static struct option options[] = {
         { "boot-entries"   , no_argument      , NULL, 'b' },
         { "running-entry"  , no_argument      , NULL, 'r' },
         { "latest-entry"   , no_argument      , NULL, 'L' },
         { "patch-procfs"   , no_argument      , NULL, 'p' },
+        { "prepare-root"   , no_argument      , NULL, 'I' },
         { "shell"          , no_argument      , NULL, 's' },
         { "shell-export"   , no_argument      , NULL, 'S' },
         { "prefix"         , required_argument, NULL, 'V' },
-        { "fetch-only"     , no_argument      , NULL, 'F' },
-        { "apply-only"     , no_argument      , NULL, 'A' },
-        { "one-shot"       , no_argument      , NULL, 'O' },
-        { "check-interval" , required_argument, NULL, 'i' },
-        { "post-apply-hook", required_argument, NULL, 'P' },
-        { "reboot-hook"    , required_argument, NULL, 'R' },
         { "log"            , required_argument, NULL, 'l' },
         { "verbose"        , no_argument      , NULL, 'v' },
         { "debug"          , optional_argument, NULL, 'd' },
         { "help"           , no_argument      , NULL, 'h' },
+        UPDATER_ENTRIES                                    ,
         { NULL, 0, NULL, 0 }
     };
     static char *domains[32] = { [0 ... 31] = NULL };
     int          ndomain     = 0;
 
     int   opt, vmask, lmask;
+#ifdef __REFKIT_UPDATER__
     char *e;
+#endif
 
     set_defaults(c, argv[0]);
     lmask = 0;
@@ -688,6 +720,10 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
             set_mode(c, UPDATER_MODE_PATCH);
             break;
 
+        case 'I':
+            set_mode(c, UPDATER_MODE_PREPARE);
+            break;
+
         case 's':
             c->print = PRINT_SHELL_EVAL;
             break;
@@ -700,6 +736,7 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
             c->prefix = optarg;
             break;
 
+#ifdef __REFKIT_UPDATER__
         case 'F':
             set_mode(c, UPDATER_MODE_FETCH);
             break;
@@ -725,6 +762,7 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
         case 'R':
             c->hook_boot = optarg;
             break;
+#endif
 
         case 'l':
             lmask = parse_log_levels(optarg);
@@ -768,10 +806,15 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
 }
 
 
-static void updater_init(context_t *c)
+#ifdef __REFKIT_UPDATER__
+static void updater_init(context_t *c, const char *argv0)
 {
     GCancellable *gcnc = NULL;
     GError       *gerr = NULL;
+
+    g_set_prgname(argv0);
+    g_setenv("GIO_USE_VFS", "local", TRUE);
+    g_log_set_handler(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, log_handler, NULL);
 
     c->repo = ostree_repo_new_default();
 
@@ -1269,7 +1312,7 @@ static int updater_run(context_t *c)
 
 static void updater_loop(context_t *c)
 {
-    int updated;
+    int updates;
 
     /*
      * Notes:
@@ -1280,18 +1323,17 @@ static void updater_loop(context_t *c)
      */
 
     for (;;) {
-        updated = updater_run(c);
+        updates = updater_run(c);
 
         if (c->oneshot)
             break;
 
-        switch (updated) {
-        case 0:
-            /* no updates, wait for next poll time */
+        switch (updates) {
+        case 0: /* no updates available */
             sleep(c->interval);
             break;
 
-        case 1:
+        case 1: /* updates fetched and applied */
             updater_reboot_hook(c); /* does not return on success */
             exit(1);
 
@@ -1308,6 +1350,8 @@ static void updater_exit(context_t *c)
 {
     UNUSED_VAR(c);
 }
+
+#endif /* __REFKIT_UPDATER__ */
 
 
 static void print_entries(context_t *c)
@@ -1403,22 +1447,22 @@ static void print_latest(context_t *c)
     if (get_boot_entries(c) < 0)
         exit(1);
 
-    if (c->running < 0)
+    if (c->latest < 0)
         exit(1);
 
-    e   = c->entries + c->running;
+    e   = c->entries + c->latest;
     exp = (c->print == PRINT_SHELL_EXPORT ? "export " : "");
 
     switch (c->print) {
     case PRINT_HUMAN_READABLE:
     default:
-        printf("running entry #%d:\n", c->running);
-        printf("            id: %d\n", e->id);
-        printf("       version: %d\n", e->version);
-        printf("       options: '%s'\n", e->options);
-        printf("          boot: '%s'\n", e->boot);
-        printf("    deployment: '%s'\n", e->deployment);
-        printf("       dev/ino: 0x%lx/0x%lx\n", e->device, e->inode);
+        printf("latest entry #%d:\n", c->running);
+        printf("              id: %d\n", e->id);
+        printf("         version: %d\n", e->version);
+        printf("         options: '%s'\n", e->options);
+        printf("            boot: '%s'\n", e->boot);
+        printf("      deployment: '%s'\n", e->deployment);
+        printf("         dev/ino: 0x%lx/0x%lx\n", e->device, e->inode);
         break;
 
     case PRINT_SHELL_EVAL:
@@ -1435,9 +1479,131 @@ static void print_latest(context_t *c)
 }
 
 
+const char *full_path(char *buf, path_t *path)
+{
+    int n;
+
+    n = snprintf(buf, PATH_MAX, "%s%s%s%s%s",
+                 path->prefix ? path->prefix : "",
+                 path->root && *path->root != '/' ? "/" : "",
+                 path->root ? path->root : "",
+                 path->path && *path->path != '/' ? "/" : "",
+                 path->path ? path->path : "");
+
+    if (n < 0 || n >= PATH_MAX)
+        return "<invalid-path:too-long>";
+
+    return buf;
+}
+
+
+static int bind_mount(path_t *s, path_t *d)
+{
+    const char *src, *dst;
+    char        srcbuf[PATH_MAX], dstbuf[PATH_MAX];
+
+    src = full_path(srcbuf, s);
+    dst = full_path(dstbuf, d);
+
+    log_info("bind-mounting %s to %s", src, dst);
+
+    return mount(src, dst, NULL, MS_BIND, NULL);
+}
+
+
+static int move_mount(path_t *s, path_t *d)
+{
+    const char *src, *dst;
+    char        srcbuf[PATH_MAX], dstbuf[PATH_MAX];
+
+    src = full_path(srcbuf, s);
+    dst = full_path(dstbuf, d);
+
+    log_info("move-mounting %s to %s", src, dst);
+
+    return mount(src, dst, NULL, MS_MOVE, NULL);
+}
+
+
+static int make_movable(const char *root, const char *dir)
+{
+    path_t path = { NULL, root, dir };
+
+    return bind_mount(&path, &path);
+}
+
+
+static int prepare_root(const char *root)
+{
+    struct {
+        path_t src;
+        path_t dst;
+    } mounts[] = {
+        { { "/rootfs", root  , "../../var" }, { "/rootfs", root, "var"  } },
+        { { "/rootfs", "boot", NULL        }, { "/rootfs", root, "boot" } },
+        { { "/rootfs", "home", NULL        }, { "/rootfs", root, "home" } },
+        { { NULL, NULL, NULL }, { NULL, NULL, NULL } },
+    }, *m;
+
+    for (m = mounts; m->src.prefix || m->src.root || m->src.path; m++)
+        if (bind_mount(&m->src, &m->dst) < 0)
+            return -1;
+
+    return 0;
+}
+
+
+static int shuffle_root(const char *root)
+{
+    struct {
+        path_t src;
+        path_t dst;
+    } mounts[] = {
+        { { "/rootfs"     , root, NULL }, { "/sysroot.tmp", NULL, NULL      } },
+        { { "/rootfs"     , NULL, NULL }, { "/sysroot.tmp", "sysroot", NULL } },
+        { { "/sysroot.tmp", NULL, NULL }, { "/rootfs"     , NULL, NULL      } },
+        { { NULL, NULL, NULL }, { NULL, NULL, NULL } },
+    }, *m;
+
+    mkdir("/sysroot.tmp", 0755);
+
+    for (m = mounts; m->src.prefix || m->src.root || m->src.path; m++)
+        if (move_mount(&m->src, &m->dst) < 0)
+            return -1;
+
+    return 0;
+}
+
+
+static void initramfs_prepare(context_t *c)
+{
+    boot_entry_t *boot;
+
+    if (get_boot_entries(c) < 0)
+        log_fatal("failed to determine boot entries");
+
+    if (c->latest < 0 || c->latest >= c->nentry)
+        log_fatal("failed to discover latest boot entry");
+
+    boot = c->entries + c->latest;
+
+    if (make_movable("/rootfs", boot->deployment) < 0)
+        log_fatal("failed to make '/rootfs/%s' movable (%d: %s)",
+                  boot->deployment, errno, strerror(errno));
+
+    if (prepare_root(boot->deployment) < 0)
+        log_fatal("failed to prepare ostree root '%s' (%d: %s)",
+                  boot->deployment, errno, strerror(errno));
+
+    if (shuffle_root(boot->deployment) < 0)
+        log_fatal("failed to shuffle ostree root '%s' (%d: %s)",
+                  boot->deployment, errno, strerror(errno));
+}
+
+
 static void patch_procfs(context_t *c)
 {
-    boot_entry_t  entries[3], *boot;
+    boot_entry_t *boot;
     char          cmdline[4096], *p;
     const char   *orig, *patched;
     int           n, l, cnt, fd, nl;
@@ -1448,7 +1614,7 @@ static void patch_procfs(context_t *c)
     if (c->running < 0)
         exit(1);
 
-    boot = entries + c->running;
+    boot = c->entries + c->running;
 
     if ((fd = open(orig = "/proc/cmdline", O_RDONLY)) < 0)
         exit(1);
@@ -1469,7 +1635,7 @@ static void patch_procfs(context_t *c)
 
     cmdline[n] = '\0';
 
-    if (strstr(cmdline, " ostree=") || strstr(cmdline, "ostree="))
+    if (strstr(cmdline, " ostree=") || strstr(cmdline, "ostree=") == cmdline)
         exit(0);
 
     l = sizeof(cmdline) - n - 1;
@@ -1516,10 +1682,6 @@ int main(int argc, char *argv[])
 
     setlocale(LC_ALL, "");
 
-    g_set_prgname(argv[0]);
-    g_setenv("GIO_USE_VFS", "local", TRUE);
-    g_log_set_handler(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, log_handler, NULL);
-
     parse_cmdline(&c, argc, argv);
 
     switch (c.mode) {
@@ -1539,13 +1701,19 @@ int main(int argc, char *argv[])
         patch_procfs(&c);
         break;
 
+    case UPDATER_MODE_PREPARE:
+        initramfs_prepare(&c);
+        break;
+
+#ifdef __REFKIT_UPDATER__
     case UPDATER_MODE_FETCH:
     case UPDATER_MODE_APPLY:
     case UPDATER_MODE_UPDATE:
-        updater_init(&c);
+        updater_init(&c, argv[0]);
         updater_loop(&c);
         updater_exit(&c);
         break;
+#endif
 
     default:
         exit(-1);

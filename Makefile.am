@@ -1,10 +1,11 @@
 HOOK_DIR  = ${datadir}/${PACKAGE_NAME}/hooks
 AM_CFLAGS = $(WARNING_CFLAGS) -DHOOK_DIR="\"${HOOK_DIR}\""
 
-bin_PROGRAMS =
-bin_SCRIPTS  = scripts/refkit-ostree
+bin_PROGRAMS   =
+script_SCRIPTS = scripts/refkit-ostree
+scriptdir      = ${datadir}/${PACKAGE_NAME}/scripts
 
-servicedir   = ${systemd_unitdir}/system
+servicedir   = ${SYSTEMD_UNITDIR}
 service_DATA = \
 	services/ostree-patch-proc-cmdline.service \
         services/ostree-update.service \
@@ -12,11 +13,18 @@ service_DATA = \
         services/ostree-post-update-failure.service \
         services/ostree-post-update-failure.target
 
+# refkit-ostree
+bin_PROGRAMS += refkit-ostree
+
+refkit_ostree_SOURCES = src/refkit-ostree.c
+refkit_ostree_CFLAGS  = $(AM_CFLAGS) $(OSTREE_CFLAGS)
+refkit_ostree_LDADD   =
+
 # refkit-ostree-update
 bin_PROGRAMS += refkit-ostree-update
 
-refkit_ostree_update_SOURCES = src/refkit-ostree-update.c
-refkit_ostree_update_CFLAGS  = $(AM_CFLAGS) $(OSTREE_CFLAGS)
+refkit_ostree_update_SOURCES = src/refkit-ostree.c
+refkit_ostree_update_CFLAGS  = $(AM_CFLAGS) $(OSTREE_CFLAGS) -D__REFKIT_UPDATER__
 refkit_ostree_update_LDADD   = $(OSTREE_LIBS)
 
 install-data-local:
