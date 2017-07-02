@@ -7,5 +7,5 @@ Conflicts=syslog.socket
 Before=shutdown.target
 
 [Service]
-ExecStart=/usr/bin/refkit-ostree post-upgrade-recovery
+ExecStart=/usr/bin/refkit-ostree-update --rollback
 Type=simple

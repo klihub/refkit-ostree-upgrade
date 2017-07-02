@@ -5,7 +5,7 @@ ConditionPathExists=/var/.ostree.updated
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/refkit-ostree post-update-check
+ExecStart=/usr/bin/refkit-ostree-update --post-update-check
 # OnFailure=ostree-post-update-failure.target
 RemainAfterExit=Yes
 TimeoutSec=0

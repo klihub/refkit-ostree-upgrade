@@ -6,7 +6,7 @@ Before=sysinit.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/refkit-ostree patch-proc-cmdline
+ExecStart=/usr/bin/refkit-ostree-update --patch-procfs
 RemainAfterExit=yes
 
 [Install]

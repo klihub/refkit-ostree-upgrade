@@ -7,7 +7,7 @@ StandardInput=null
 StandardOutput=journal
 StandardError=inherit
 RemainAfterExit=no
-ExecStart=/usr/bin/refkit-ostree --poll-interval 300 update-daemon
+ExecStart=/usr/bin/refkit-ostree-update --check-interval 300
 
 [Install]
 WantedBy=multi-user.target
