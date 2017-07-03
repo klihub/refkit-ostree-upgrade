@@ -31,6 +31,11 @@ install-data-local:
 	install -m 0755 -d $(DESTDIR)$(HOOK_DIR)/post-apply.d
 	install -m 0755 -T $(top_srcdir)/hooks/run-hooks \
 	    $(DESTDIR)$(HOOK_DIR)/post-apply
+	for h in $(top_srcdir)/hooks/post-apply.d/[0-9]*; do \
+	    if [ -x $$h ]; then \
+	        install -m 0755 $$h $(DESTDIR)$(HOOK_DIR)/post-apply.d; \
+	    fi; \
+	done
 
 	install -m 0755 -d $(DESTDIR)$(HOOK_DIR)/post-update.d
 	install -m 0755 -T $(top_srcdir)/hooks/run-hooks \
