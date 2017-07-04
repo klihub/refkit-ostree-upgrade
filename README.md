@@ -1,2 +1,2 @@
-This package contains a small extra/wrapper script for booting,
-upgrading, etc. ostree-based RefKit images.
+This package contains extra binaries and scripts used to help booting
+and keeping up-to-date devices running IoT Reference Kit OS images.
