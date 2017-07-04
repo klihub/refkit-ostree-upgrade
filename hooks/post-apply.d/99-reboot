@@ -1,0 +1,7 @@
+#!/bin/sh
+
+echo "Requesting system reboot to activate updates..."
+sync
+
+echo "Triggering ostree-post-update-reboot service..."
+systemctl start ostree-post-update-reboot

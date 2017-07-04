@@ -2,7 +2,7 @@ HOOK_DIR  = ${datadir}/${PACKAGE_NAME}/hooks
 AM_CFLAGS = $(WARNING_CFLAGS) -DHOOK_DIR="\"${HOOK_DIR}\""
 
 bin_PROGRAMS   =
-script_SCRIPTS = scripts/refkit-ostree
+script_SCRIPTS = scripts/refkit-ostree scripts/inhibitable-reboot
 scriptdir      = ${datadir}/${PACKAGE_NAME}/scripts
 
 servicedir   = ${SYSTEMD_UNITDIR}
