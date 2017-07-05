@@ -49,7 +49,6 @@
 /* defaults */
 #define UPDATER_HOOK(path) HOOK_DIR"/"path
 #define UPDATER_HOOK_APPLY UPDATER_HOOK("post-apply")
-#define UPDATER_HOOK_BOOT  UPDATER_HOOK("reboot")
 #define UPDATER_INTERVAL   (15 * 60)
 #define UPDATER_DISTRO     "refkit"
 #define UPDATER_PREFIX     "REFKIT_OSTREE"
@@ -95,7 +94,6 @@ typedef struct {
     OstreeSysroot         *sysroot;          /* ostree sysroot instance */
     OstreeSysrootUpgrader *u;                /* ostree sysroot upgrader */
     const char            *hook_apply;       /* post-update script */
-    const char            *hook_boot;        /* request reboot script */
     int                    inhibit_fd;       /* shutdown inhibitor pid */
     int                    inhibit_pid;      /* active inhibitor process */
     const char            *argv0;            /* us... */
@@ -103,8 +101,9 @@ typedef struct {
     int                    nentry;
     int                    latest;           /* latest boot entry */
     int                    running;          /* running boot entry */
+    int                    pending;          /* pending updates */
     int                    print;            /* var/setup printing mode */
-    const char            *prefix;
+    const char            *prefix;           /* shell variable prefix */
 } context_t;
 
 /* fd redirection for child process */
@@ -230,7 +229,6 @@ static void set_defaults(context_t *c, const char *argv0)
     c->mode       = UPDATER_MODE_DEFAULT;
     c->interval   = UPDATER_INTERVAL;
     c->hook_apply = UPDATER_HOOK_APPLY;
-    c->hook_boot  = UPDATER_HOOK_BOOT;
     c->argv0      = argv0;
     c->distro     = UPDATER_DISTRO;
     c->prefix     = UPDATER_PREFIX;
@@ -302,7 +300,6 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
             "  -O, --one-shot               run once, then exit\n"
             "  -i, --check-interval         update check interval (in seconds)\n"
             "  -P, --post-apply-hook PATH   script to run after an update\n"
-            "  -R, --reboot-hook PATH       script to request rebooting\n"
 #endif
             "  -l, --log LEVELS             set logging levels\n"
             "  -v, --verbose                increase loggin verbosity\n"
@@ -316,12 +313,10 @@ static void print_usage(const char *argv0, int exit_code, const char *fmt, ...)
     fprintf(stderr, "\nThe defaults are:\n"
             "  distro name: %s\n"
             "  post-apply hook: %s\n"
-            "  boot hook: %s\n"
             "  shell variable prefix: %s\n"
             "  check interval: %d\n",
             c.distro,
             c.hook_apply,
-            c.hook_boot,
             c.prefix,
             c.interval);
 #endif
@@ -660,14 +655,13 @@ static int get_boot_entries(context_t *c)
 static void parse_cmdline(context_t *c, int argc, char **argv)
 {
 #ifdef __REFKIT_UPDATER__
-#   define UPDATER_OPTIONS "FAOi:P:R:"
+#   define UPDATER_OPTIONS "FAOi:P:R"
 #   define UPDATER_ENTRIES \
         { "fetch-only"     , no_argument      , NULL, 'F' }, \
         { "apply-only"     , no_argument      , NULL, 'A' }, \
         { "one-shot"       , no_argument      , NULL, 'O' }, \
         { "check-interval" , required_argument, NULL, 'i' }, \
-        { "post-apply-hook", required_argument, NULL, 'P' }, \
-        { "reboot-hook"    , required_argument, NULL, 'R' }
+        { "post-apply-hook", required_argument, NULL, 'P' }
 #else
 #    define UPDATER_OPTIONS ""
 #    define UPDATER_ENTRIES { NULL, 0, NULL, 0 }
@@ -757,10 +751,6 @@ static void parse_cmdline(context_t *c, int argc, char **argv)
 
         case 'P':
             c->hook_apply = optarg;
-            break;
-
-        case 'R':
-            c->hook_boot = optarg;
             break;
 #endif
 
@@ -1045,6 +1035,7 @@ static int updater_prepare(context_t *c)
 
  no_upgrader:
     log_error("failed to create OSTree upgrader (%s)", gerr->message);
+    updater_allow_shutdown(c);
     return -1;
 }
 
@@ -1135,77 +1126,6 @@ static int updater_post_apply_hook(context_t *c, const char *o, const char *n)
 
  hook_failure:
     log_error("post-apply hook (%s) failed with status %d", c->hook_apply,
-              WEXITSTATUS(ec));
-    return -1;
-
-#   undef TIMEOUT
-}
-
-
-static int updater_reboot_hook(context_t *c)
-{
-#   define TIMEOUT 60
-
-    char *argv[8];
-    pid_t pid;
-    int   status, ec, cnt;
-
-    if (!*c->hook_boot)
-        goto no_hook;
-
-    if (access(c->hook_boot, X_OK) < 0)
-        goto no_access;
-
-    log_info("running post-apply boot hook %s...", c->hook_boot);
-
-    argv[0] = (char *)c->hook_boot;
-    argv[1] = NULL;
-
-    pid = updater_invoke(argv, NULL);
-
-    if (pid < 0)
-        return -1;
-
-    log_info("waiting for boot hook (%s) to finish...", c->hook_boot);
-
-    cnt = 0;
-    while ((status = waitpid(pid, &ec, WNOHANG)) != pid) {
-        if (cnt++ < TIMEOUT)
-            sleep(1);
-        else
-            break;
-    }
-
-    if (status != pid)
-        goto timeout;
-
-    if (!WIFEXITED(ec))
-        goto hook_error;
-
-    if (WEXITSTATUS(ec) != 0)
-        goto hook_failure;
-
-    log_info("boot hook (%s) succeeded, exiting", c->hook_apply);
-    exit(0);
-
- no_hook:
-    return 0;
-
- no_access:
-    log_error("can't execute post-apply boot hook '%s'", c->hook_boot);
-    return -1;
-
- timeout:
-    log_error("boot hook (%s) didn't finish in %d seconds",
-              c->hook_boot, TIMEOUT);
-    return -1;
-
- hook_error:
-    log_error("boot hook (%s) exited abnormally", c->hook_boot);
-    return -1;
-
- hook_failure:
-    log_error("boot hook (%s) failed with status %d", c->hook_boot,
               WEXITSTATUS(ec));
     return -1;
 
@@ -1318,7 +1238,7 @@ static void updater_loop(context_t *c)
      * Notes:
      *
      *   This is extremely simplistic now. Since ostree uses heavily
-     *   gobjects/GMmainLoop we could easily/perhaps should switch
+     *   gobjects/GMainLoop we could easily/perhaps should switch
      *   to using GMainLoop.
      */
 
@@ -1334,8 +1254,9 @@ static void updater_loop(context_t *c)
             break;
 
         case 1: /* updates fetched and applied */
-            updater_reboot_hook(c); /* does not return on success */
-            exit(1);
+            c->pending = 1;
+            c->mode &= ~UPDATER_MODE_APPLY;
+            break;
 
         default:
             sleep(30);
