@@ -1,5 +1,5 @@
 [Unit]
-Description=Poll/fetch available OS updates.
+Description=RefKit Base OS Updater
 
 [Service]
 Type=simple

@@ -1,7 +1,5 @@
 #!/bin/sh
 
-echo "Requesting system reboot to activate updates..."
+echo "Triggering refkit-reboot service for rebooting..."
 sync
-
-echo "Triggering ostree-post-update-reboot service..."
-systemctl start ostree-post-update-reboot
+systemctl start refkit-reboot

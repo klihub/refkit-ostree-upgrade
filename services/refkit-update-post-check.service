@@ -1,5 +1,5 @@
 [Unit]
-Description=Perform any post-update checks.
+Description=Perform post-update checks at the first boot after an update.
 After=network.target
 ConditionPathExists=/var/.ostree.updated
 

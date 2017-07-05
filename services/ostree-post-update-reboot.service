@@ -1,7 +1,0 @@
-[Unit]
-Description=Post-update, wait for shutdown-inhibitor locks, then reboot.
-DefaultDependencies=no
-
-[Service]
-Type=simple
-ExecStart=/usr/share/refkit-ostree/scripts/inhibitable-reboot

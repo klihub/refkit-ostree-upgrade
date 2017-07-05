@@ -2,16 +2,17 @@ HOOK_DIR  = ${datadir}/${PACKAGE_NAME}/hooks
 AM_CFLAGS = $(WARNING_CFLAGS) -DHOOK_DIR="\"${HOOK_DIR}\""
 
 bin_PROGRAMS   =
-script_SCRIPTS = scripts/refkit-ostree scripts/inhibitable-reboot
+script_SCRIPTS = scripts/refkit-ostree scripts/systemd-inhibitable-reboot
 scriptdir      = ${datadir}/${PACKAGE_NAME}/scripts
 
 servicedir   = ${SYSTEMD_UNITDIR}
 service_DATA = \
-	services/ostree-patch-proc-cmdline.service \
-        services/ostree-update.service \
-        services/ostree-post-update.service \
-        services/ostree-post-update-failure.service \
-        services/ostree-post-update-failure.target
+	services/refkit-patch-ostree-param.service \
+        services/refkit-update.service \
+        services/refkit-update-post-check.service \
+        services/refkit-reboot.service \
+        services/refkit-update-post-failure.service \
+        services/refkit-update-post-failure.target
 
 # refkit-ostree
 bin_PROGRAMS += refkit-ostree
